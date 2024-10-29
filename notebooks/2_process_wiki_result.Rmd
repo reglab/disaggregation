@@ -1,0 +1,401 @@
+---
+title: "process_wiki_results"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-09-23"
+output: html_document
+---
+
+In this notebook, we clean up the records collected from Wikidata Query Service. 
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(stringi)
+library(yaml)
+source("scripts/name_cleaning_helper_functions.R")
+```
+
+```{r}
+load("external_data/surname_census_L2.rda")
+census_surnames <- readRDS("external_data/census_surnames.rds")
+```
+
+```{r load data}
+major_groups <- c(
+  "asian_indian",
+  "chinese",
+  "filipino",
+  "japanese",
+  "korean",
+  "vietnamese"
+)
+
+wqs <- map_dfr(major_groups, function(x){
+  
+  result <- 
+    readRDS(paste0("data/raw_wikidata/", x, ".rds"))
+  
+  return(result)
+  }
+)
+```
+
+```{r}
+wqs_clean <- wqs %>% 
+  select(
+    fullname, 
+    fullnameLabel, 
+    surnameLabel,
+    firstnameLabel, 
+    subgroup
+  ) %>% 
+  mutate(across(
+    contains("Label"), 
+    str_format_removal
+  )) %>% 
+  distinct() %>% 
+  filter(if_any(
+    contains("Label"),
+    ~!is.na(.)
+  )) %>% 
+  arrange(fullname) %>% 
+  mutate(index = row_number())
+
+saveRDS(wqs_clean, "data/intermediate_data/wqs_clean.rds")
+```
+
+# Name Cleaning
+
+The following function can be run on either the firstnameLabel or surnameLabel.
+
+```{r}
+find_names <- function(data, type, exclude_column = NA, name_column = "fullnameLabel"){
+  
+  if(type == "firstname"){
+    reference_namelist = l2_firstname
+  } else {
+    reference_namelist = l2_surname
+  }
+  
+  df <- data %>% 
+    rename(name = all_of(name_column)) %>% 
+    filter(!is.na(name)) %>% 
+    separate_rows(name)
+  
+  if(!is.na(exclude_column)){
+    
+    df <- df %>% 
+      rename(exclude = all_of(exclude_column)) %>% 
+      group_by(index) %>% 
+      filter(!(name == exclude & !duplicated(name)))
+    
+  }
+  
+  df <- df %>% 
+    group_by(index) %>% 
+    transmute(
+      index,
+      name,
+      word_order = row_number(),
+      max_word_order = max(word_order)
+    ) %>% 
+    ungroup()
+  
+  for(position in 2:max(df$word_order)){
+    
+    df <- df %>% 
+      filter(max_word_order >= position) %>% 
+      select(-max_word_order) %>% 
+      filter(word_order %in% (position - 1):position) %>% 
+      pivot_wider(
+        names_from = "word_order",
+        values_from = "name"
+      ) %>% 
+      set_names(c("index","1","2")) %>% 
+      transmute(
+        index,
+        name = paste0(`1`,`2`),
+        word_order = NA,
+        max_word_order = NA
+      ) %>% 
+      rbind(df)
+    
+  }
+  
+  for(position in 3:max(df$word_order, na.rm=T)){
+    
+    df <- df %>% 
+      filter(max_word_order >= position) %>% 
+      select(-max_word_order) %>% 
+      filter(word_order %in% (position - 2):position) %>% 
+      pivot_wider(
+        names_from = "word_order",
+        values_from = "name"
+      ) %>% 
+      set_names(c("index","1","2","3")) %>% 
+      transmute(
+        index,
+        name = paste0(`1`,`2`,`3`),
+        word_order = NA,
+        max_word_order = NA
+      ) %>% 
+      rbind(df)
+    
+  }
+  
+  df <- df %>% 
+    group_by(index) %>% 
+    filter(!duplicated(name)) %>% 
+    left_join(reference_namelist, by = "name") %>% 
+    mutate(
+      length = nchar(name),
+      score = precision * recall * length
+    ) %>% 
+    group_by(index) %>% 
+    arrange(desc(score))
+  
+  final <- data %>% 
+    left_join(df, by = "index")
+    
+}
+
+fill_in_name <- function(data, type, exclude_column, name_column = "fullnameLabel"){
+  
+  df <- data %>% 
+    rename(fill = all_of(type), exclude = all_of(exclude_column), name = all_of(name_column)) %>% 
+    filter(is.na(fill)) %>%
+    separate_rows(name) %>% 
+    group_by(index) %>% 
+    filter(!(name == exclude & !duplicated(name))) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>% 
+    select(index, name)
+  
+  final <- data %>% 
+    rename(fill = all_of(type)) %>% 
+    filter(is.na(fill)) %>% 
+    select(-fill) %>% 
+    left_join(df, by = "index") %>% 
+    rbind(
+      data %>% 
+        rename(fill = all_of(type)) %>% 
+        filter(!is.na(fill)) %>% 
+        rename(name = fill)
+    ) %>% 
+    set_names(c("index","subgroup","fullname","fullnameLabel","firstnameLabel","surnameLabel",exclude_column,type))
+  
+}
+```
+
+# Full pipeline
+
+```{r}
+l2_surname <- p_race_given_surname %>% 
+  select(name,precision = api) %>% 
+  left_join(
+    p_surname_given_race %>% 
+      select(name,recall = api)
+  )
+
+census_surname <- census_surnames %>% 
+  select(NAME, COUNT, PCTAPI) %>% 
+  mutate(n = round(COUNT*PCTAPI/100)) %>% 
+  filter(!is.na(n), n > 0) %>% 
+  mutate(recall = n/sum(n)) %>% 
+  transmute(name = NAME, precision = PCTAPI/100, recall)
+
+l2_firstname <- p_race_given_firstname %>% 
+  select(name,precision = api) %>% 
+  left_join(
+    p_firstname_given_race %>% 
+      select(name,recall = api)
+  )
+
+wqs_final <- rbind(
+  wqs_clean %>% 
+    filter(!is.na(surnameLabel), !is.na(firstnameLabel)) %>% 
+    transmute(
+      index,
+      subgroup,
+      fullname,
+      fullnameLabel,
+      firstnameLabel,
+      surnameLabel,
+      firstname = firstnameLabel,
+      surname = surnameLabel
+    ),
+  wqs_clean %>% 
+    filter(!is.na(surnameLabel),is.na(firstnameLabel)) %>% 
+    find_names(type = "firstname", exclude_column = "surnameLabel") %>% 
+    arrange(desc(score)) %>% 
+    filter(!duplicated(index)) %>% 
+    transmute(
+      index,
+      subgroup,
+      fullname,
+      fullnameLabel,
+      firstnameLabel,
+      surnameLabel,
+      firstname = ifelse(
+        !is.na(score),
+        name,
+        NA
+      ),
+      surname = surnameLabel
+    ),
+  wqs_clean %>% 
+    filter(is.na(surnameLabel),!is.na(firstnameLabel)) %>% 
+    find_names(type = "surname", exclude_column = "firstnameLabel") %>% 
+    arrange(desc(score)) %>% 
+    filter(!duplicated(index)) %>% 
+    transmute(
+      index,
+      subgroup,
+      fullname,
+      fullnameLabel,
+      firstnameLabel,
+      surnameLabel,
+      firstname = firstnameLabel,
+      surname = ifelse(
+        !is.na(score),
+        name,
+        NA
+      )
+    ),
+  wqs_clean %>% 
+    filter(is.na(surnameLabel),is.na(firstnameLabel)) %>% 
+    find_names(type = "surname") %>% 
+    arrange(desc(score)) %>% 
+    filter(!duplicated(index)) %>% 
+    transmute(
+      index,
+      subgroup,
+      fullname,
+      fullnameLabel,
+      firstnameLabel,
+      surnameLabel,
+      surname = ifelse(
+        !is.na(score),
+        name,
+        NA
+      )
+    ) %>% 
+    find_names(type = "firstname", exclude_column = "surname") %>% 
+    arrange(desc(score)) %>% 
+    filter(!duplicated(index)) %>% 
+    transmute(
+      index,
+      subgroup,
+      fullname,
+      fullnameLabel,
+      firstnameLabel,
+      surnameLabel,
+      firstname = ifelse(
+        !is.na(score),
+        name,
+        NA
+      ),
+      surname
+    )
+) %>% 
+  fill_in_name(type = "surname", exclude_column = "firstname") %>% 
+  fill_in_name(type = "firstname", exclude_column = "surname") %>% 
+  transmute(
+    index,
+    subgroup,
+    fullname,
+    fullnameLabel,
+    firstnameLabel,
+    surnameLabel,
+    firstname = firstname %>% 
+      gsub(" ","",.),
+    surname = surname %>% 
+      gsub(" ","",.)
+  ) %>% 
+  arrange(index)
+
+saveRDS(wqs_final, "data/intermediate_data/wqs_final.rds")
+
+final_fn <- wqs_final %>% 
+  select(fullname,subgroup,firstname) %>% 
+  filter(!is.na(firstname))
+
+saveRDS(final_fn, "data/intermediate_data/final_fn_main.rds")
+
+final_sn <- wqs_final %>% 
+  select(fullname,subgroup,surname) %>% 
+  filter(!is.na(surname))
+
+saveRDS(final_sn, "data/intermediate_data/final_sn_main.rds")
+```
+
+# Minimalist Version
+
+```{r}
+final_fn_min <- wqs_clean %>% 
+  mutate(
+    name = firstnameLabel %>% 
+      gsub(" ","",.)
+  ) %>% 
+  filter(!is.na(name)) %>% 
+  select(fullname,subgroup,firstname = name)
+
+saveRDS(final_fn_min, "data/intermediate_data/final_fn_min.rds")
+
+final_sn_min <- wqs_clean %>% 
+  mutate(
+    name = surnameLabel %>% 
+      gsub(" ","",.)
+  ) %>% 
+  filter(!is.na(name)) %>% 
+  select(fullname,subgroup,surname = name)
+
+saveRDS(final_sn_min, "data/intermediate_data/final_sn_min.rds")
+```
+
+# Maximalist version
+
+```{r}
+final_fn_max <- rbind(
+  wqs_clean %>% 
+    transmute(
+      fullname,
+      subgroup,
+      firstname = firstnameLabel %>% 
+        gsub(" ","",.)
+    ),
+  wqs_clean %>% 
+    find_names(type = "firstname", exclude_column = "surnameLabel") %>% 
+    transmute(
+      fullname,
+      subgroup,
+      firstname = name
+    )
+) %>% 
+  filter(!is.na(firstname)) %>% 
+  distinct()
+
+saveRDS(final_fn_max, "data/intermediate_data/final_fn_max.rds")
+
+final_sn_max <- rbind(
+  wqs_clean %>% 
+    transmute(
+      fullname,
+      subgroup,
+      surname = surnameLabel %>% 
+        gsub(" ","",.)
+    ),
+  wqs_clean %>% 
+    find_names(type = "surname", exclude_column = "firstnameLabel") %>% 
+    transmute(
+      fullname,
+      subgroup,
+      surname = name
+    )
+) %>% 
+  filter(!is.na(surname)) %>% 
+  distinct()
+
+saveRDS(final_sn_max, "data/intermediate_data/final_sn_max.rds")
+```

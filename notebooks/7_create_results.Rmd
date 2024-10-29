@@ -1,0 +1,1425 @@
+---
+title: "create_results"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-10-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r}
+library(dplyr)
+library(purrr)
+library(readr)
+library(stringr)
+library(tidyr)
+library(scales)
+library(yaml)
+library(yardstick)
+library(bayestestR)
+library(doParallel)
+registerDoParallel(detectCores())
+options(dplyr.summarise.inform = FALSE)
+
+github_path <- ""
+server_path <- ""
+github_result_path <- paste0(github_path, "output/results/")
+server_result_path <- paste0(server_path, "disaggregation/results/")
+fig_path <- paste0(github_path, "output/figures/")
+
+clean_group_names <- list(
+  "asian_indian"="Asian Indian",
+  "chinese"="Chinese",
+  "filipino"="Filipino",
+  "japanese"="Japanese",
+  "korean"="Korean", 
+  "vietnamese"="Vietnamese"
+)
+
+ssa_name_mapping <- list(
+	"C" = "chinese",
+	"R" = "filipino",
+	"J" = "japanese",
+	"K" = "korean",
+	"I" = "asian_indian",
+  "V" = "vietnamese"
+  )
+
+ssa_surnames <- read_csv(paste0(github_path,"external_data/SSA_Surnames.csv")) %>% 
+  mutate(
+    type = recode(
+      str_sub(type, 1, 1), 
+      !!!unlist(ssa_name_mapping)
+    )
+  ) %>% 
+  distinct()
+
+ssa_p_race_given_surname <- ssa_surnames %>% 
+  mutate(values = 1) %>% 
+  filter(!is.na(name),!is.na(type)) %>% 
+  pivot_wider(
+    names_from = "type",
+    values_from = "values"
+  ) %>% 
+  mutate(across(
+    everything(),
+    ~replace_na(., 0)
+  )) %>% 
+  select(name,asian_indian,chinese,filipino,japanese,korean,vietnamese)
+```
+
+# Wiki stats
+
+```{r}
+wqs_clean <- readRDS(paste0(github_path,"data/intermediate_data/wqs_clean.rds")) %>% 
+  filter(!duplicated(fullname)) 
+```
+
+```{r}
+nrow(wqs_clean)
+sum(!is.na(wqs_clean$firstnameLabel))/nrow(wqs_clean)
+sum(!is.na(wqs_clean$surnameLabel))/nrow(wqs_clean)
+```
+
+```{r}
+wqs_final <- readRDS(paste0(github_path,"data/intermediate_data/wqs_final.rds"))
+```
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+```
+
+```{r}
+wqs_final %>% 
+  filter(firstname %in% p_race_given_firstname$name | surname %in% p_race_given_surname$name) %>% 
+  filter(!duplicated(fullname)) %>% 
+  nrow()
+
+sum(!duplicated(p_race_given_firstname$name))
+sum(!duplicated(p_race_given_surname$name))
+```
+
+How often race is available
+
+```{r}
+major_groups <- c(
+  "asian_indian",
+  "chinese",
+  "filipino",
+  "japanese",
+  "korean",
+  "vietnamese"
+)
+
+wqs <- map_dfr(major_groups, function(x){
+  
+  result <- 
+    readRDS(paste0(github_path,"data/raw_wikidata/", x, ".rds"))
+  
+  return(result)
+  }
+)
+```
+
+```{r}
+race_availability <- wqs_final %>% 
+  filter(firstname %in% p_race_given_firstname$name | surname %in% p_race_given_surname$name) %>% 
+  filter(!duplicated(fullname)) %>%
+  left_join(wqs %>% select(fullname, raceLabel) %>% arrange(raceLabel) %>% filter(!duplicated(fullname)))
+
+sum(!is.na(race_availability$raceLabel))/nrow(race_availability)
+```
+
+# SSA vs. Wiki general stats
+
+```{r}
+ssa_firstnames <- read_csv(paste0(github_path,"external_data/SSA_Givennames.csv")) %>% 
+  mutate(
+    type = recode(
+      str_sub(subgroup, 1, 1), 
+      !!!unlist(ssa_name_mapping)
+    )
+  ) %>% 
+  filter(!duplicated(name))
+
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+common_firstnames <- p_race_given_firstname %>% 
+  filter(name %in% ssa_firstnames$name)
+
+common_surnames <- p_race_given_surname %>% 
+  filter(name %in% ssa_surnames$name)
+```
+
+```{r}
+nrow(ssa_firstnames)
+nrow(ssa_surnames)
+nrow(common_firstnames)
+nrow(common_surnames)
+nrow(ssa_firstnames) - nrow(common_firstnames)
+nrow(ssa_surnames) - nrow(common_surnames)
+nrow(p_race_given_firstname) - nrow(common_firstnames)
+nrow(p_race_given_surname) - nrow(common_surnames)
+```
+
+```{r}
+common_firstnames_compare <- p_race_given_firstname %>% 
+  pivot_longer(
+    -name,
+    names_to = "raceeth",
+    values_to = "value"
+  ) %>% 
+  group_by(name) %>% 
+  arrange(desc(value)) %>% 
+  filter(!duplicated(name)) %>%
+  ungroup() %>% 
+  inner_join(ssa_firstnames)
+
+common_surnames_compare <- p_race_given_surname %>% 
+  pivot_longer(
+    -name,
+    names_to = "raceeth",
+    values_to = "value"
+  ) %>% 
+  group_by(name) %>% 
+  arrange(desc(value)) %>% 
+  filter(!duplicated(name)) %>%
+  ungroup() %>% 
+  inner_join(ssa_surnames)
+```
+
+```{r}
+sum(common_firstnames_compare$raceeth == common_firstnames_compare$type, na.rm=T)/nrow(common_firstnames_compare)
+
+sum(common_surnames_compare$raceeth == common_surnames_compare$type, na.rm=T)/nrow(common_surnames_compare)
+```
+
+Total increase in probabilistic information
+
+```{r}
+probabilistic_surnames <- common_surnames %>% 
+  pivot_longer(-name, names_to = "raceeth") %>% 
+  filter(!value %in% c(0,1)) %>% 
+  filter(!duplicated(name))
+
+nrow(probabilistic_surnames)/nrow(common_surnames)
+
+probabilistic_firstnames <- common_firstnames %>% 
+  pivot_longer(-name, names_to = "raceeth") %>% 
+  filter(!value %in% c(0,1)) %>% 
+  filter(!duplicated(name))
+
+nrow(probabilistic_firstnames)/nrow(common_firstnames)
+
+asian_patients <- readRDS(paste0(server_path,"disaggregation/asian_patients.rds"))
+
+common_surnames_validation <- asian_patients %>% 
+  filter(surname %in% ssa_p_race_given_surname$name & surname %in% p_race_given_surname$name)
+
+sum(!duplicated(common_surnames_validation$surname))
+
+probabilistic_surnames_validation <- common_surnames_validation %>% 
+  select(patientuid,surname) %>% 
+  left_join(common_surnames, by = c("surname"="name")) %>% 
+  pivot_longer(-c(patientuid,surname), names_to = "raceeth") %>% 
+  filter(!value %in% c(0,1)) %>% 
+  filter(!duplicated(patientuid))
+
+sum(!duplicated(probabilistic_surnames_validation$surname))
+
+nrow(probabilistic_surnames_validation)/nrow(common_surnames_validation)
+
+asian_patients %>% filter(surname %in% probabilistic_surnames_validation$surname) %>% nrow()
+
+(asian_patients %>% filter(surname %in% probabilistic_surnames_validation$surname) %>% nrow())/nrow(asian_patients)
+```
+
+# Validation set stats
+
+```{r}
+asian_patients <- readRDS(paste0(server_path,"disaggregation/asian_patients.rds"))
+```
+
+## Race recording errors
+
+```{r}
+DIR_PATH <- "/home/douyang1/bifsg/"
+
+geo_race_table_lst <- readRDS(paste0(DIR_PATH,"geo_race_table.rds"))
+p_race_given_surname <- readRDS(paste0(DIR_PATH,"p_race_given_surname.rds"))
+p_surname_given_race <- readRDS(paste0(DIR_PATH,"p_surname_given_race.rds"))
+p_race_given_firstname <- readRDS(paste0(DIR_PATH,"p_race_given_firstname.rds"))
+p_firstname_given_race <- readRDS(paste0(DIR_PATH,"p_firstname_given_race.rds"))
+
+source(paste0(DIR_PATH,"bisg_functions.R"))
+
+asian_patients_regular_bisg <- asian_patients %>% 
+  rename(id = patientuid) %>% 
+  predict_race(firstname = T, geo = "tract") %>% 
+  select(id,firstname,surname,patientracetext,raceeth,aian,api,black,hispanic,white,other)
+
+asian_patients_regular_bisg2 <- asian_patients_regular_bisg %>% 
+  pivot_longer(
+    aian:other,
+    names_to = "group",
+    values_to = "value"
+  ) %>%
+  group_by(id) %>%
+  arrange(desc(value)) %>%
+  ungroup() %>% 
+  filter(!duplicated(id))
+
+sum(asian_patients_regular_bisg2$group == "api")/nrow(asian_patients_regular_bisg2)
+
+asian_patients_regular_bisg3 <- asian_patients_regular_bisg2 %>% 
+  group_by(raceeth) %>% 
+  summarize(
+    perc_api = sum(group == "api")/n()
+  )
+
+geo_race_table_lst <- readRDS(paste0(github_path,"data/geography/geo_race_table.rds"))
+```
+
+## Age
+
+```{r}
+age_summary <- asian_patients %>% 
+  mutate(age = 2024 - as.numeric(substr(dob,1,4)))
+
+median(age_summary$age, na.rm=T)
+```
+
+# Table 2
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+top_names <- cbind(
+  p_surname_given_race %>% 
+    arrange(desc(asian_indian)) %>% 
+    head(10) %>% 
+    select(`Asian Indian` = name),
+  p_surname_given_race %>% 
+    arrange(desc(chinese)) %>% 
+    head(10) %>% 
+    select(Chinese = name),
+  p_surname_given_race %>% 
+    arrange(desc(filipino)) %>% 
+    head(10) %>% 
+    select(Filipino = name),
+  p_surname_given_race %>% 
+    arrange(desc(japanese)) %>% 
+    head(10) %>% 
+    select(Japanese = name),
+  p_surname_given_race %>% 
+    arrange(desc(korean)) %>% 
+    head(10) %>% 
+    select(Korean = name),
+  p_surname_given_race %>% 
+    arrange(desc(vietnamese)) %>% 
+    head(10) %>% 
+    select(Vietnamese = name)
+)
+```
+
+# PR curves
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds"))
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  mutate(Method = case_when(
+    Method == "BISG" ~ "Wikidata",
+    Method == "SSA" ~ "SSA",
+    Method == "Hybrid" ~ "Hybrid"
+  ) %>% factor(levels = c("Hybrid","SSA","Wikidata"))) %>% 
+  filter(!is.na(Method)) %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      color = Method,
+      linetype = Method,
+      linewidth = Method
+    )
+  ) +
+  scale_color_manual(values = c("#D55E00","#0072B2","#000000"), breaks = c("SSA","Wikidata","Hybrid")) +
+  scale_linetype_manual(values = c("solid","solid","dashed"), breaks = c("SSA","Wikidata","Hybrid")) + 
+  scale_fill_manual(values = c("#D55E00","#0072B2","#FFFFFF"), breaks = c("SSA","Wikidata","Hybrid")) +
+  scale_linewidth_manual(values = c(0.5,0.5,0.75), breaks = c("SSA","Wikidata","Hybrid")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision", linetype = "Method") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/pr_curves.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+# Table 3
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+asian_patients <- readRDS(paste0(server_path,"disaggregation/asian_patients.rds"))
+
+patients_categorized <- asian_patients %>% 
+  mutate(
+    category = case_when(
+      surname %in% ssa_p_race_given_surname$name & surname %in% p_race_given_surname$name ~ "both",
+      surname %in% ssa_p_race_given_surname$name ~ "ssa only",
+      surname %in% p_race_given_surname$name ~ "wiki only",
+      TRUE ~ "neither"
+    )
+  )
+
+summary <- patients_categorized %>% 
+  mutate(race = recode(raceeth, !!!unlist(clean_group_names))) %>% 
+  group_by(category,race) %>% 
+  count()
+```
+
+```{r}
+boot_pr_results <- readRDS(paste0(github_result_path, "boot_results_main.rds"))
+
+avg_precision_full <- boot_pr_results %>% 
+  rename(recall = x, precision = y) %>% 
+  group_by(race, Method, sample) %>% 
+  mutate(recall_prev = c(NA,recall %>% head(-1))) %>% 
+  filter(!is.na(recall_prev)) %>% 
+  mutate(avg_precision = precision * (recall - recall_prev)) %>% 
+  group_by(race, Method, sample) %>% 
+  summarize(avg_precision = sum(avg_precision)) %>% 
+  group_by(race, Method) %>% 
+  summarize(
+    mean = mean(avg_precision,na.rm=T),
+    lwr = quantile(avg_precision, probs = c(0.025)),
+    upr = quantile(avg_precision, probs = c(0.975))
+  ) %>% 
+  transmute(
+    Method,
+    avg_precision = paste0(round(mean,2)," (",round(lwr,2),"-",round(upr,2),")")
+  ) %>% 
+  ungroup() %>% 
+  rbind(
+    summary %>% 
+      group_by(race) %>% 
+      summarize(avg_precision = sum(n)) %>% 
+      mutate(
+        Method = "Count"
+      ) 
+  ) %>% 
+  mutate(category = "All") %>% 
+  pivot_wider(
+    names_from = "race",
+    values_from = "avg_precision"
+  )
+```
+
+```{r}
+pr_lst <- readRDS(paste0(github_result_path,"boot_results_stratified_by_category.rds"))
+
+avg_precision <- pr_lst %>% 
+  filter(Method != "Hybrid") %>% 
+  rename(recall = x, precision = y) %>% 
+  group_by(race, Method, sample, category) %>% 
+  mutate(recall_prev = c(NA,recall %>% head(-1))) %>% 
+  filter(!is.na(recall_prev)) %>% 
+  mutate(avg_precision = precision * (recall - recall_prev)) %>% 
+  group_by(race, Method, sample, category) %>% 
+  summarize(avg_precision = sum(avg_precision)) %>% 
+  group_by(race, Method, category) %>% 
+  summarize(
+    mean = mean(avg_precision,na.rm=T),
+    lwr = quantile(avg_precision, probs = c(0.025)),
+    upr = quantile(avg_precision, probs = c(0.975))
+  ) %>% 
+  transmute(
+    Method,
+    race,
+    category,
+    avg_precision = paste0(round(mean,2)," (",round(lwr,2),"-",round(upr,2),")")
+  ) %>% 
+  ungroup() %>% 
+  rbind(
+    summary %>% 
+      rename(avg_precision = n) %>% 
+      mutate(
+        Method = "Count"
+      ) 
+  ) %>% 
+  pivot_wider(
+    names_from = "race",
+    values_from = "avg_precision"
+  ) %>% 
+  rbind(avg_precision_full) %>% 
+  mutate(
+    Method = Method %>% factor(levels = c("Count","SSA","BISG","Hybrid")),
+    category = category %>% factor(levels = c("both","wiki only","ssa only","neither","All"))
+  ) %>% 
+  arrange(category, Method) %>% 
+  select(Category = category,Method,everything())
+```
+
+# PR Tradeoff
+
+## Precision
+
+```{r}
+bootstrap_precision_results <- readRDS(paste0(github_result_path, "bootstrap_precision_results.rds"))
+
+summary <- bootstrap_precision_results %>% 
+  filter(method != "BISG") %>% 
+  rename(threshold = type) %>% 
+  select(-total) %>% 
+  pivot_wider(
+    names_from = "method",
+    values_from = "count"
+  ) %>% 
+  group_by(threshold, raceeth) %>% 
+  summarize(
+    mean = mean(Hybrid-SSA, na.rm=T),
+    lwr = quantile(Hybrid-SSA, probs = c(0.025), na.rm=T),
+    upr = quantile(Hybrid-SSA, probs = c(0.975), na.rm=T)
+  ) %>% 
+  ungroup()
+
+summary2 <- bootstrap_precision_results %>% 
+  rename(threshold = type) %>% 
+  group_by(method,threshold, raceeth) %>% 
+  summarize(
+    mean = mean(count, na.rm=T),
+    lwr = quantile(count, probs = c(0.025), na.rm=T),
+    upr = quantile(count, probs = c(0.975), na.rm=T)
+  ) %>% 
+  ungroup()
+```
+
+## Recall plot
+
+```{r}
+bootstrap_recall_results <- readRDS(paste0(github_result_path, "bootstrap_recall_results.rds"))
+
+summary <- bootstrap_recall_results %>% 
+  filter(method != "BISG") %>% 
+  rename(threshold = type) %>% 
+  select(-total_actual,-oversample) %>% 
+  pivot_wider(
+    names_from = "method",
+    values_from = "outreach"
+  ) %>% 
+  group_by(threshold, raceeth) %>% 
+  summarize(
+    mean = mean(Hybrid-SSA, na.rm=T),
+    lwr = quantile(Hybrid-SSA, probs = c(0.025), na.rm=T),
+    upr = quantile(Hybrid-SSA, probs = c(0.975), na.rm=T)
+  ) %>% 
+  ungroup()
+
+summary2 <- bootstrap_recall_results %>% 
+  rename(threshold = type) %>% 
+  group_by(method, threshold, raceeth) %>% 
+  summarize(
+    mean = mean(outreach, na.rm=T),
+    lwr = quantile(outreach, probs = c(0.025), na.rm=T),
+    upr = quantile(outreach, probs = c(0.975), na.rm=T)
+  ) %>% 
+  ungroup()
+```
+
+# Health disparities
+
+## Plot
+
+```{r}
+prevalence_results <- readRDS(paste0(github_result_path,"prevalence_results.rds"))
+
+label_fix = function(x) sub("[^@]*@","",x)
+
+clean_outcome_names <- list(
+  "asthma"="Asthma",
+  "cancer"="Cancer",
+  "chronickidneydisease"="Chronic Kidney Disease",
+  "depression"="Depression",
+  "depressionscreen"="Depression Screening",
+  "diabetes"="Diabetes", 
+  "diabetes_test"="Diabetes Test (HbA1c)",
+  "hypertension"="Hypertension"
+)
+
+summary <- prevalence_results %>% 
+  filter(type %in% c("observed","SSA weighted","BISG weighted", "Hybrid weighted")) %>%
+  group_by(type, raceeth, outcome) %>% 
+  summarize(
+    low = quantile(n/total*100, probs = c(0.025)),
+    high = quantile(n/total*100, probs = c(0.975)),
+    n = mean(n),
+    total = mean(total),
+    prev = mean(n/total*100)
+  ) %>%
+  group_by(raceeth, outcome) %>% 
+  arrange(desc(type), prev) %>% 
+  mutate(
+    prev_order = prev[which(type == "observed")]
+  ) %>% 
+  arrange(desc(prev_order)) %>% 
+  mutate(
+    outcome = recode(outcome,!!!unlist(clean_outcome_names))
+  ) %>% 
+  mutate(raceeth = recode(raceeth,!!!unlist(clean_group_names))) %>% 
+  mutate(
+    level_order = paste(outcome,raceeth,sep="@") %>% factor(levels = unique(.))
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    type = case_when(
+      type == "observed" ~ "Actual EHR data",
+      grepl("SSA", type) ~ "SSA prediction",
+      grepl("BISG", type) ~ "Wikidata prediction",
+      grepl("Hybrid", type) ~ "Hybrid prediction"
+    ) %>% 
+      factor(levels = c("Actual EHR data","SSA prediction","Wikidata prediction","Hybrid prediction")),
+    type2 = type,
+    outcome = outcome %>% factor(levels = c("Asthma","Hypertension","Diabetes Test (HbA1c)","Diabetes","Depression Screening","Depression"))
+  ) %>% 
+  mutate(
+    line_positions = as.numeric(factor(raceeth, levels = unique(raceeth))),
+    line_positions = line_positions + .5,
+    line_positions = ifelse(line_positions == max(line_positions), NA, line_positions)
+  ) 
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+)
+
+plot <- ggplot(summary) +
+  geom_vline(
+    aes(xintercept = line_positions),
+    color = "gray",
+    linewidth = 0.3
+  ) + 
+  geom_point(
+    aes(
+      x = level_order %>% reorder(prev_order),
+      y = prev,
+      color = type,
+      fill = type,
+      group = type,
+      size = total
+    ),
+    shape = 21,
+    position = position_dodge(width = 0.75),
+    alpha = 0.5,
+    stat = "identity"
+  ) +
+  geom_errorbar(
+    aes(
+      x = level_order %>% reorder(prev_order),
+      y = prev,
+      ymin = low,
+      ymax = high,
+      color = type,
+      group = type
+    ),
+    position = position_dodge(width = 0.75),
+    linewidth = 0.5,
+    width = 0
+  ) +
+  coord_flip() +
+  scale_x_discrete(
+    labels = label_fix,
+    expand = c(0.1,0.1)
+  ) +
+  facet_wrap(
+    vars(outcome),
+    ncol = 2,
+    scales = "free",
+    labeller = label_wrap_gen(width = 50)
+  ) +
+  theme_minimal(base_size = 10) +
+  scale_size_binned(
+    range = c(3,9),
+    breaks = c(1000, 5000, 15000)
+  ) +
+  scale_color_manual(
+    values = c("#009E73","#D55E00","#0072B2","#000000")
+  ) +
+  scale_fill_manual(
+    values = c("#009E73","#D55E00","#0072B2","#FFFFFF")
+  ) +
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    ),
+    size = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
+  labs(
+    x = "Race/Ethnicity",
+    y = "Prevalence (%)",
+    color = "Type",
+    fill = "Type",
+    size = "# of Patients"
+  ) +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/prevalences.png'),
+  plot,
+  width = 9,
+  height = 11,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+## Table 4
+
+```{r}
+prevalence_results <- readRDS(paste0(github_result_path,"prevalence_results.rds"))
+
+actual_prevalence <- expand.grid(
+  sample = 1:100,
+  outcome = unique(prevalence_results$outcome),
+  raceeth = unique(prevalence_results$raceeth)
+) %>% 
+  left_join(
+    prevalence_results %>% 
+      filter(type == "observed") %>% 
+      select(sample, outcome, raceeth, n, total) %>% 
+      distinct(),
+    by = c("sample","outcome","raceeth")
+  ) %>% 
+  filter(!is.na(n)) %>% 
+  group_by(sample,outcome) %>% 
+  summarize(
+    n = sum(n),
+    total = sum(total)
+  ) %>% 
+  mutate(prev = n/total)
+
+actual_prevalence_summary <- actual_prevalence %>% 
+  group_by(outcome) %>% 
+  summarize(
+    prev = mean(n/total),
+    lwr = quantile(n/total, probs = c(0.025)),
+    upr = quantile(n/total, probs = c(0.975))
+  ) %>% 
+  mutate(
+    prev = paste0(round(prev*100,1)," (", round(lwr*100,1),"-",round(upr*100,1),")")
+  ) %>% 
+  select(outcome, prev) %>% 
+  pivot_wider(names_from = "outcome", values_from = "prev") %>% 
+  select(asthma, hypertension, diabetes_test, diabetes, depressionscreen, depression)
+
+predicted_disparity <- expand.grid(
+  sample = 1:100,
+  type = unique(prevalence_results$type),
+  outcome = unique(prevalence_results$outcome)
+) %>% 
+  cross_join(combn(unique(prevalence_results$raceeth),2) %>% t() %>% as.data.frame()) %>% 
+  left_join(
+    prevalence_results %>% 
+      select(sample, type, outcome, V1 = raceeth, prev1 = prev) %>% 
+      distinct(),
+    by = c("sample","type","outcome","V1")
+  ) %>% 
+  left_join(
+    prevalence_results %>% 
+      select(sample, type, outcome, V2 = raceeth, prev2 = prev) %>% 
+      distinct(),
+    by = c("sample","type","outcome","V2")
+  ) %>% 
+  mutate(diff = prev1 - prev2) %>% 
+  filter(!is.na(diff)) %>% 
+  group_by(type, sample, outcome) %>% 
+  summarize(
+    avg = mean(abs(diff)),
+    max = max(abs(diff))
+  ) %>% 
+  group_by(type, outcome) %>% 
+  summarize(
+    lwr = quantile(avg, probs = c(0.025)),
+    upr = quantile(avg, probs = c(0.975)),
+    avg = mean(avg),
+    lwr_max = quantile(max, probs = c(0.025)),
+    upr_max = quantile(max, probs = c(0.975)),
+    max = mean(max)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    avg = paste0(round(avg*100,1)," (", round(lwr*100,1),"-",round(upr*100,1),")"),
+    max = paste0(round(max*100,1)," (", round(lwr_max*100,1),"-",round(upr_max*100,1),")")
+  )
+
+predicted_disparity_max <- predicted_disparity %>% 
+  select(type, outcome, max) %>% 
+  pivot_wider(names_from = "outcome", values_from = "max") %>% 
+  select(type, asthma, hypertension, diabetes_test, diabetes, depressionscreen, depression)
+
+predicted_disparity_avg <- predicted_disparity %>% 
+  select(type, outcome, avg) %>% 
+  pivot_wider(names_from = "outcome", values_from = "avg") %>% 
+  select(type, asthma, hypertension, diabetes_test, diabetes, depressionscreen, depression)
+```
+
+# SI: Alternatives
+
+## Min Max
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds")) %>% 
+  filter(Method == "BISG") %>% 
+  mutate(Method = "Wikidata, Main") %>% 
+  rbind(
+    readRDS(paste0(github_result_path, "boot_results_min.rds")) %>% 
+      mutate(Method = "Wikidata, Minimalist"),
+    readRDS(paste0(github_result_path, "boot_results_max.rds")) %>% 
+      mutate(Method = "Wikidata, Maximalist")
+  )
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    data = . %>% filter(!Method %in% c("Wikidata, Main")),
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_ribbon(
+    data = . %>% filter(Method %in% c("Wikidata, Main")),
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      color = Method
+    )
+  ) +
+  scale_color_manual(values = c("#0072B2","#000000","#999999")) +
+  scale_fill_manual(values = c("#0072B2","#ffffff","#ffffff")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/minmax.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+## Geography
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds")) %>% 
+  filter(Method == "BISG") %>% 
+  mutate(Method = "Wikidata, County") %>% 
+  rbind(
+    readRDS(paste0(github_result_path, "boot_results_tract.rds")) %>% 
+      mutate(Method = "Wikidata, Tract"),
+    readRDS(paste0(github_result_path, "boot_results_zip.rds")) %>% 
+      mutate(Method = "Wikidata, ZCTA"),
+    readRDS(paste0(github_result_path, "boot_results_state.rds")) %>% 
+      mutate(Method = "Wikidata, State")
+  ) %>% 
+  mutate(Method = Method %>% factor(levels=c("Wikidata, State","Wikidata, County","Wikidata, ZCTA","Wikidata, Tract")))
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    data = . %>% filter(Method == "Wikidata, County"),
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr
+    ),
+    fill = "#0072B2",
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      linetype = Method
+    ),
+    color = "#0072B2"
+  ) +
+  scale_linetype_manual(values = c("longdash","solid","dashed","dotted")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/geography.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+## BIFSG
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds")) %>% 
+  filter(Method %in% c("SSA","BISG")) %>% 
+  mutate(Method = ifelse(Method == "SSA","SSA, surname", "Wikidata, BISG")) %>% 
+  rbind(
+    readRDS(paste0(github_result_path, "boot_results_bifsg.rds")) %>% 
+      mutate(Method = ifelse(Method == "BIFSG", "Wikidata, BIFSG", "SSA, surname and first name"))
+  )
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      color = Method,
+      linetype = Method
+    )
+  ) +
+  scale_color_manual(values = c("#D55E00","#D55E00","#0072B2","#0072B2")) +
+  scale_fill_manual(values = c("#D55E00","#FFFFFF","#FFFFFF","#0072B2")) +
+  scale_linetype_manual(values = c("solid","dashed","dashed","solid")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/bifsg.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+# SI: IPUMS
+
+```{r}
+ipums_fn <- readRDS(paste0(github_path,"data/intermediate_data/final_fn_ipums.rds"))
+ipums_sn <- readRDS(paste0(github_path,"data/intermediate_data/final_sn_ipums.rds"))
+
+length(c(unique(ipums_fn$id), unique(ipums_sn$id)))
+
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_ipums.rda"))
+
+nrow(p_firstname_given_race)
+nrow(p_surname_given_race)
+```
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds")) %>% 
+  filter(Method == "BISG") %>% 
+  mutate(Method = "Wikidata") %>% 
+  rbind(
+    readRDS(paste0(github_result_path, "boot_results_ipums.rds")) %>% 
+      mutate(Method = "Historical censuses")
+  )
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      color = Method
+    )
+  ) +
+  scale_color_manual(values = c("#CC79A7","#0072B2")) +
+  scale_fill_manual(values = c("#CC79A7","#0072B2")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/ipums.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+# SI: Balanced
+
+## PR curves
+
+```{r}
+boot_results <- readRDS(paste0(github_result_path, "boot_results_balanced.rds"))
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom"
+  )
+)
+
+plot <- boot_results %>% 
+  mutate(Method = case_when(
+    Method == "BISG" ~ "Wikidata",
+    Method == "SSA" ~ "SSA",
+    Method == "Hybrid" ~ "Hybrid"
+  ) %>% factor(levels = c("Hybrid","SSA","Wikidata"))) %>% 
+  filter(!is.na(Method)) %>% 
+  group_by(race,Method,x) %>% 
+  summarize(
+    mean = mean(y,na.rm=T),
+    lwr = quantile(y, probs = c(0.025)),
+    upr = quantile(y, probs = c(0.975))
+  ) %>% 
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = x,
+      ymin = lwr,
+      ymax = upr,
+      fill = Method
+    ),
+    alpha = 0.25
+  ) +
+  geom_line(
+    aes(
+      x = x, 
+      y = mean, 
+      color = Method,
+      linetype = Method,
+      linewidth = Method
+    )
+  ) +
+  scale_color_manual(values = c("#D55E00","#0072B2","#000000"), breaks = c("SSA","Wikidata","Hybrid")) +
+  scale_linetype_manual(values = c("solid","solid","dashed"), breaks = c("SSA","Wikidata","Hybrid")) + 
+  scale_fill_manual(values = c("#D55E00","#0072B2","#FFFFFF"), breaks = c("SSA","Wikidata","Hybrid")) +
+  scale_linewidth_manual(values = c(0.5,0.5,0.75), breaks = c("SSA","Wikidata","Hybrid")) +
+  coord_equal() + 
+  facet_wrap(~race) + 
+  theme_bw() + 
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    )
+  ) +
+  labs(x = "Recall", y = "Precision", linetype = "Method") +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/pr_curves_balanced.png'),
+  plot,
+  width = 9,
+  height = 7,
+  bg = 'white',
+  dpi = 600
+)
+```
+
+## Health disparities
+
+```{r}
+prevalence_results <- readRDS(paste0(github_result_path,"prevalence_results_balanced.rds"))
+
+label_fix = function(x) sub("[^@]*@","",x)
+
+clean_outcome_names <- list(
+  "asthma"="Asthma",
+  "cancer"="Cancer",
+  "chronickidneydisease"="Chronic Kidney Disease",
+  "depression"="Depression",
+  "depressionscreen"="Depression Screening",
+  "diabetes"="Diabetes", 
+  "diabetes_test"="Diabetes Test (HbA1c)",
+  "hypertension"="Hypertension"
+)
+
+summary <- prevalence_results %>% 
+  filter(type %in% c("observed","SSA weighted","BISG weighted", "Hybrid weighted")) %>%
+  group_by(type, raceeth, outcome) %>% 
+  summarize(
+    low = quantile(n/total*100, probs = c(0.025)),
+    high = quantile(n/total*100, probs = c(0.975)),
+    n = mean(n),
+    total = mean(total),
+    prev = mean(n/total*100)
+  ) %>% 
+  group_by(raceeth, outcome) %>% 
+  arrange(desc(type), prev) %>% 
+  mutate(
+    prev_order = prev[which(type == "observed")]
+  ) %>% 
+  arrange(desc(prev_order)) %>% 
+  mutate(outcome = recode(outcome,!!!unlist(clean_outcome_names))) %>% 
+  mutate(raceeth = recode(raceeth,!!!unlist(clean_group_names))) %>% 
+  mutate(
+    level_order = paste(outcome,raceeth,sep="@") %>% factor(levels = unique(.))
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    type = case_when(
+      type == "observed" ~ "Actual EHR data",
+      grepl("SSA", type) ~ "SSA prediction",
+      grepl("BISG", type) ~ "Wikidata prediction",
+      grepl("Hybrid", type) ~ "Hybrid prediction"
+    ) %>% 
+      factor(levels = c("Actual EHR data","SSA prediction","Wikidata prediction","Hybrid prediction")),
+    type2 = type,
+    outcome = outcome %>% factor(levels = c("Asthma","Hypertension","Diabetes Test (HbA1c)","Diabetes","Depression Screening","Depression"))
+  ) %>% 
+  mutate(
+    line_positions = as.numeric(factor(raceeth, levels = unique(raceeth))),
+    line_positions = line_positions + .5,
+    line_positions = ifelse(line_positions == max(line_positions), NA, line_positions)
+  ) 
+
+figure_setting_lst <- list(
+  theme_bw(),
+  theme(
+    strip.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1, "lines"),
+    legend.direction = "vertical",
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank()
+  )
+)
+
+plot <- ggplot(summary) +
+  geom_vline(
+    aes(xintercept = line_positions),
+    color = "gray",
+    linewidth = 0.3
+  ) + 
+  geom_point(
+    aes(
+      x = level_order %>% reorder(prev_order),
+      y = prev,
+      color = type,
+      fill = type,
+      group = type,
+      size = total
+    ),
+    shape = 21,
+    position = position_dodge(width = 0.75),
+    alpha = 0.5,
+    stat = "identity"
+  ) +
+  geom_errorbar(
+    aes(
+      x = level_order %>% reorder(prev_order),
+      y = prev,
+      ymin = low,
+      ymax = high,
+      color = type,
+      group = type
+    ),
+    position = position_dodge(width = 0.75),
+    linewidth = 0.5,
+    width = 0
+  ) +
+  coord_flip() +
+  scale_x_discrete(
+    labels = label_fix,
+    expand = c(0.1,0.1)
+  ) +
+  facet_wrap(
+    vars(outcome),
+    ncol = 2,
+    scales = "free",
+    labeller = label_wrap_gen(width = 50)
+  ) +
+  theme_minimal(base_size = 10) +
+  scale_size_binned(
+    range = c(3,9),
+    breaks = c(1000, 5000, 15000)
+  ) +
+  scale_color_manual(
+    values = c("#009E73","#D55E00","#0072B2","#000000")
+  ) +
+  scale_fill_manual(
+    values = c("#009E73","#D55E00","#0072B2","#FFFFFF")
+  ) +
+  guides(
+    color = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5,
+      override.aes = list(size = 6)
+    ),
+    size = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
+  labs(
+    x = "Race/Ethnicity",
+    y = "Prevalence (%)",
+    color = "Type",
+    fill = "Type",
+    size = "# of Patients"
+  ) +
+  figure_setting_lst
+
+plot
+
+ggsave(
+  paste0(fig_path, '/prevalences_balanced.png'),
+  plot,
+  width = 9,
+  height = 11,
+  bg = 'white',
+  dpi = 600
+)
+```

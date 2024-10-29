@@ -1,0 +1,252 @@
+---
+title: "create_disagg_geo_tables"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-09-18"
+output: html_document
+---
+
+# Introduction
+
+This file creates the geographic conditional probability tables P(Race|Geolocation) and P(Geolocation|Race) for Asian subgroups.
+
+# Setup
+
+```{r}
+library(tigris)
+library(censusapi)
+library(tidyverse)
+library(furrr)
+library(yaml)
+Sys.setenv(CENSUS_KEY="dbe04b6900453a6f813d1136af7fc11f9357932c") 
+```
+
+```{r}
+options(tigris_use_cache = FALSE)
+census_year <- 2022
+```
+
+```{r meta data}
+census_metadata <- 
+  listCensusMetadata(
+    name = paste0(census_year,"/acs/acs5"),
+    type = "variables"
+  )
+```
+
+```{r parallel parameters}
+n_cores <- parallel::detectCores()
+max_size = 1*1024^3
+options(future.globals.maxSize= max_size)
+plan(multisession, workers = n_cores / 2)
+```
+
+# Helper Functions
+
+```{r census helper functions}
+# this helper function prepares a list of arguments for us to use
+# before calling the census api given the geographic granularity we specify
+prepare_census_query <- function(region, state, var, year){
+  
+  census_env <- list(
+    name = "acs/acs5",
+    vintage = year,
+    region = paste0(region, ":*"),
+    regionin = paste0("state:", state),
+    vars = c(var)
+  )
+  
+  if (region %in% c("us", "state", "zip code tabulation area")){
+    census_env$regionin <- NULL
+  }
+
+  return(census_env)
+}
+
+# this function downloads and processes the population data from census
+# region: geographic granularity (tract, county, etc)
+# state: two-digit state FIPS code to narrow the search
+# var: variable name like group(B02015)
+# group: asian or nhpi
+download_census_data <- function(region, state, var, group, 
+                                 year=census_year){
+  
+  census_env <- prepare_census_query(region, state, var, year)
+  
+  # using non-standard evaluation here
+  census_raw <- tryCatch(rlang::exec(getCensus, !!!census_env), 
+                         error = function(e) NULL)
+  # get variable name and clean the format
+  pop_df <- 
+    census_raw %>% 
+    mutate(GEOID = str_remove(GEO_ID, ".*?US")) %>% 
+    select(GEOID, starts_with("B") & ends_with("E")) %>%
+    pivot_longer(
+      -GEOID,
+      names_to = "variable",
+      values_to = "estimate"
+    ) %>% 
+    left_join(
+      census_metadata %>% 
+        select(name, label), 
+      by = c("variable" = "name")
+    ) %>% 
+    select(-variable) %>% 
+    mutate(subgroup = str_extract(label, "[^!!]+$")) %>% 
+    filter(!str_detect(subgroup, "Total")) %>% 
+    mutate(
+      subgroup_label = subgroup %>% tolower() %>% 
+        gsub(",","",.) %>% 
+        gsub(",| \\(check box only)","",.) %>% 
+        gsub(" ","_",.),
+      group = group
+    ) %>% 
+    select(-label) %>% 
+    rename(pop = estimate)
+  
+  return(pop_df)
+}
+```
+
+```{r post-processing helper function}
+post_process <- function(df){
+  # this function recalculates the population estimates 
+  
+  df_reshaped <- df %>% 
+    select(-subgroup, -group) %>% 
+    rename(subgroup = subgroup_label) %>% 
+    group_by(GEOID) %>% 
+    ungroup() %>% 
+    mutate(
+      subgroups = length(unique(subgroup))
+    ) %>% 
+    pivot_wider(
+      names_from = "subgroup",
+      values_from = "pop"
+    ) %>% 
+    transmute(
+      GEOID, 
+      asian_indian, 
+      chinese = chinese_except_taiwanese,
+      filipino, 
+      japanese,
+      korean, 
+      vietnamese
+    )
+  
+  return(df_reshaped)
+}
+```
+
+# Running the pipeline
+
+```{r tract and county}
+# some states don't have tract data; exclude from loop
+# "United States Virgin Islands"                
+# "Commonwealth of the Northern Mariana Islands"
+# "Guam"                                        
+# "American Samoa"   
+states <- states() %>% 
+  select(NAME,STATEFP) %>% 
+  filter(!STATEFP %in% c("78", "66", "60", "69"))
+
+geo_levels <- c("tract", "county")
+
+geo_result_lst <- future_map(geo_levels, function(geo_level){
+  
+  geo_results_combined <- 
+    map_dfr(states$STATEFP, function(state){
+      geo_results <- 
+        download_census_data(state = state, region = geo_level,
+                             var = "group(B02015)", 
+                             group = "asian", 
+                             year = 2022) %>% 
+        post_process()
+      })
+})
+```
+
+```{r state and zcta}
+geo_result_2 <- map(c("state", "zip code tabulation area", "us"), 
+                    function(geo){
+
+  result_df <- 
+    download_census_data(state = NULL, region = geo,
+                         var = "group(B02015)", 
+                         group = "asian",
+                         year = 2022) %>% 
+    post_process()
+  
+  if (geo == "us"){
+    result_df <- result_df %>% 
+      mutate(GEOID = "1")
+  }
+  
+  return(result_df)
+})
+
+geo_result_counts <- c(geo_result_lst, geo_result_2)
+
+saveRDS(
+  geo_result_counts, 
+  "data/geography/geo_race_counts.rds"
+)
+```
+
+# Data Export 
+
+```{r normalize helper}
+# normalize to create P(R|G) and P(G|R)
+normalize_geo <- function(geo_df, geo_level){
+  
+  p_race_given_geo <- geo_df %>% 
+    mutate(count = rowSums(select(., -c(GEOID)))) %>% 
+    filter(count > 0) %>% 
+    mutate(
+      across(
+        -c(GEOID),
+        ~(./count)
+      )
+    ) %>% 
+    select(-count)
+
+  p_geo_given_race <- geo_df %>% 
+    filter(GEOID %in% p_race_given_geo$GEOID) %>% 
+    mutate(
+      across(
+        -GEOID,
+        ~(./sum(.))
+      )
+    )
+  
+  if (geo_level == "zip code tabulation area"){
+    geo_level <- "zcta"
+  }
+  
+  geo_race <- paste("p", geo_level, "given_race", sep = "_")
+  race_geo <- paste("p_race_given", geo_level, sep = "_")
+  
+  geo_prior_list <- vector("list", length = 0)
+
+  geo_prior_list[[geo_race]] <- p_geo_given_race
+  geo_prior_list[[race_geo]] <- p_race_given_geo
+  
+  return(geo_prior_list)
+}
+```
+
+```{r normalize}
+output_cond_tables <- 
+  map2(
+    geo_result_counts, 
+    c(geo_levels, "state","zip code tabulation area", "us"),
+    normalize_geo
+  ) %>% 
+  list_flatten()
+```
+
+```{r export}
+saveRDS(
+  output_cond_tables, 
+  "data/geography/geo_race_table.rds"
+)
+```

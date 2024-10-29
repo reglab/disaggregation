@@ -1,0 +1,135 @@
+---
+title: "create_name_prior_table"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-10-23"
+output: html_document
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+source("scripts/name_table_helper_functions.R")
+```
+
+```{r}
+load("external_data/surname_census_L2.rda")
+L2_p_race_given_surname <- p_race_given_surname
+L2_p_race_given_firstname <- p_race_given_firstname
+```
+
+# Create prior tables
+
+```{r}
+geo_race_table <- readRDS("data/geography/geo_race_table.rds")
+
+asian_pop_rescale <- geo_race_table$p_race_given_us %>% 
+  select(-GEOID) %>% 
+  mutate(constant = rowSums(.)) %>% 
+  mutate(across(asian_indian:vietnamese, ~.x/constant)) %>% 
+  select(-constant) %>% 
+  pivot_longer(
+    cols = everything(), 
+    names_to = "subgroup", 
+    values_to = "share"
+  )
+
+census_surnames <- readRDS("external_data/census_surnames.rds") %>% 
+  select(NAME, COUNT, PCTAPI) %>% 
+  mutate(n = round(COUNT*PCTAPI/100)) %>% 
+  filter(!is.na(n), n > 0)
+```
+
+```{r}
+strings <- c("main","min","max")
+
+for(string in strings){
+  
+  final_sn <- readRDS(paste0("data/intermediate_data/final_sn_",string,".rds")) %>% 
+    rename(name = surname)
+  
+  final_fn <- readRDS(paste0("data/intermediate_data/final_fn_",string,".rds")) %>% 
+    rename(name = firstname)
+  
+  weighted_sn <- name_weighting(final_sn, "surname")
+  
+  weighted_fn <- name_weighting(final_fn, "firstname")
+  
+  p_race_given_surname <- weighted_sn %>% 
+    mutate(
+      count = rowSums(weighted_sn %>% select(-name)),
+      across(-name, ~(./count))
+    ) %>% 
+    select(-count)
+  
+  p_race_given_firstname <- weighted_fn %>% 
+    mutate(
+      count = rowSums(weighted_fn %>% select(-name)),
+      across(-name, ~(./count))
+    ) %>% 
+    select(-count)
+  
+  p_surname_given_race <- weighted_sn %>% 
+    mutate(across(-name, ~(./sum(.)))) 
+  
+  p_firstname_given_race <- weighted_fn %>% 
+    mutate(across(-name, ~(./sum(.))))
+  
+  prior_name <- paste0("disagg_name_priors_",string)
+  
+  save(
+    p_race_given_surname,
+    p_race_given_firstname,
+    p_surname_given_race,
+    p_firstname_given_race,
+    file = paste0("data/name_race_data/", prior_name, ".rda")
+  )
+  
+}
+```
+
+# USA historical census version
+
+```{r}
+final_sn <- readRDS("data/intermediate_data/final_sn_ipums.rds") %>% 
+  rename(name = surname)
+
+final_fn <- readRDS("data/intermediate_data/final_fn_ipums.rds") %>% 
+  rename(name = firstname)
+
+weighted_sn <- name_weighting_ipums(final_sn, "surname") %>% 
+  mutate(vietnamese = 0)
+
+weighted_fn <- name_weighting_ipums(final_fn, "firstname") %>% 
+  mutate(vietnamese = 0)
+
+p_race_given_surname <- weighted_sn %>% 
+  mutate(
+    count = rowSums(weighted_sn %>% select(-name)),
+    across(-name, ~(./count))
+  ) %>% 
+  select(-count)
+
+p_race_given_firstname <- weighted_fn %>% 
+  mutate(
+    count = rowSums(weighted_fn %>% select(-name)),
+    across(-name, ~(./count))
+  ) %>% 
+  select(-count)
+
+p_surname_given_race <- weighted_sn %>% 
+  mutate(across(-name, ~(./sum(.)))) 
+
+p_firstname_given_race <- weighted_fn %>% 
+  mutate(across(-name, ~(./sum(.))))
+
+prior_name <- paste0("disagg_name_priors_ipums")
+
+save(
+  p_race_given_surname,
+  p_race_given_firstname,
+  p_surname_given_race,
+  p_firstname_given_race,
+  file = paste0("data/name_race_data/", prior_name, ".rda")
+)
+```

@@ -1,0 +1,26 @@
+[
+    {
+        "subgroup_label": "asian_indian",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q668 .}"]
+    },
+    {
+        "subgroup_label": "chinese",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q148 .}"]
+    },
+    {
+        "subgroup_label": "filipino",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q928 .}"]
+    },
+    {
+        "subgroup_label": "japanese",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q17 .}"]
+    },
+    {
+        "subgroup_label": "korean",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q884 .}"]
+    },
+    {
+        "subgroup_label": "vietnamese",
+        "query": ["{?fullname wdt:P27|(wdt:P19/wdt:P17) wd:Q881 .}"]
+    }
+]

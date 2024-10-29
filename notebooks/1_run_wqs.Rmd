@@ -1,0 +1,29 @@
+---
+title: "run_wqs"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-09-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r}
+library(readr)
+library(tidyverse)
+library(WikidataQueryServiceR)
+library(yaml)
+library(jsonlite)
+source("scripts/wikidata_query_helper_functions.R")
+```
+
+```{r}
+subgroup_query <- read_json("scripts/subgroup_queries.json")
+```
+
+# Run Wikidata Query
+
+```{r}
+map(.x=subgroup_query, ~run_wiki_pipeline(.x, "data_output"), .progress=T)
+```

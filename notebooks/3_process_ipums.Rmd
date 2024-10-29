@@ -1,0 +1,86 @@
+---
+title: "process_ipums"
+author: "Derek Ouyang"
+date: "2024-09-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(ipumsr)
+```
+
+Files were downloaded from https://usa.ipums.org/usa-action/data_requests/download using the data request portal. Refer to the xml files for the query specifications.
+
+```{r}
+ddi <- read_ipums_ddi("external_data/ipums_race.xml")
+raw_race <- read_ipums_micro(ddi)
+
+ddi <- read_ipums_ddi("external_data/ipums_bpl.xml")
+raw_bpl <- read_ipums_micro(ddi)
+
+ddi <- read_ipums_ddi("external_data/ipums_fbpl.xml")
+raw_fbpl <- read_ipums_micro(ddi)
+
+raw <- rbind(raw_race,raw_bpl,raw_fbpl) %>% 
+  distinct()
+```
+
+```{r}
+race_options <- raw %>% 
+  group_by(RACED) %>% 
+  count()
+
+clean <- raw %>% 
+  filter(RACED %in% 400:640 | BPL %in% 500:521 | FBPL %in% 500:521) %>% 
+  transmute(
+    id = row_number(),
+    PERWT,
+    firstname = NAMEFRST,
+    surname = NAMELAST,
+    RACED,
+    BPL,
+    FBPL,
+    subgroup = case_when(
+      RACED == 400 ~ "chinese",
+      RACED == 500 ~ "japanese",
+      RACED == 600 ~ "filipino",
+      RACED == 610 ~ "asian_indian",
+      RACED == 620 ~ "korean",
+      RACED == 640 ~ "vietnamese",
+      BPL == 500 ~ "chinese", 
+      BPL == 501 ~ "japanese",
+      BPL == 502 ~ "korean",
+      BPL == 515 ~ "filipino",
+      BPL == 518 ~ "vietnamese",
+      BPL == 521 ~ "asian_indian",
+      FBPL == 500 ~ "chinese", 
+      FBPL == 501 ~ "japanese",
+      FBPL == 502 ~ "korean",
+      FBPL == 515 ~ "filipino",
+      FBPL == 518 ~ "vietnamese",
+      FBPL == 521 ~ "asian_indian"
+    )
+  ) %>% 
+  filter(!is.na(subgroup))
+```
+
+```{r}
+final_sn_ipums <- clean %>% 
+  select(id, PERWT, subgroup, surname) %>% 
+  filter(!grepl("[[:punct:]]|[0-9]", surname)) %>% 
+  mutate(surname = surname %>% gsub(" ","",.))
+
+saveRDS(final_sn_ipums, "data/intermediate_data/final_sn_ipums.rds")
+
+final_fn_ipums <- clean %>% 
+  select(id, PERWT, subgroup, firstname) %>% 
+  filter(!grepl("[[:punct:]]|[0-9]", firstname)) %>% 
+  mutate(firstname = firstname %>% gsub(" ","",.))
+
+saveRDS(final_fn_ipums, "data/intermediate_data/final_fn_ipums.rds")
+```

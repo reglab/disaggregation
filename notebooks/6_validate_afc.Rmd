@@ -1,0 +1,1063 @@
+---
+title: "validate_afc"
+author: "Qiwei Lin and Derek Ouyang"
+date: "2024-10-29"
+output: html_document
+---
+
+# Setup
+
+```{r}
+library(dplyr)
+library(readr)
+library(mltest)
+library(furrr)
+library(future)
+library(tictoc)
+library(stringr)
+library(tidyr)
+library(doParallel)
+registerDoParallel(detectCores())
+
+github_path <- ""
+server_path <- ""
+github_result_path <- paste0(github_path, "output/results/")
+server_result_path <- paste0(server_path, "disaggregation/results/")
+fig_path <- paste0(github_path, "output/figures/")
+  
+source(paste0(github_path, "scripts/name_cleaning_helper_functions.R"))
+source(paste0(github_path, "scripts/imputation_helper_functions.R"))
+
+clean_group_names <- list(
+  "asian_indian"="Asian Indian",
+  "chinese"="Chinese",
+  "filipino"="Filipino",
+  "japanese"="Japanese",
+  "korean"="Korean", 
+  "vietnamese"="Vietnamese"
+)
+
+geo_race_table_lst <- readRDS(paste0(github_path,"data/geography/geo_race_table.rds"))
+
+ssa_name_mapping <- list(
+	"C" = "chinese",
+	"R" = "filipino",
+	"J" = "japanese",
+	"K" = "korean",
+	"I" = "asian_indian",
+  "V" = "vietnamese"
+  )
+
+ssa_surnames <- read_csv(paste0(github_path,"external_data/SSA_Surnames.csv")) %>% 
+  mutate(
+    type = recode(
+      str_sub(type, 1, 1), 
+      !!!unlist(ssa_name_mapping)
+    )
+  )
+
+ssa_p_race_given_surname <- ssa_surnames %>% 
+  mutate(values = 1) %>% 
+  filter(!is.na(name),!is.na(type)) %>% 
+  pivot_wider(
+    names_from = "type",
+    values_from = "values"
+  ) %>% 
+  mutate(across(
+    everything(),
+    ~replace_na(., 0)
+  )) %>% 
+  select(name,asian_indian,chinese,filipino,japanese,korean,vietnamese)
+```
+
+# Create validation set with AFC
+
+This data processing can only be done with raw AFC data containing PHI.
+
+```{r}
+# patients <- read_csv(paste0(server_path,"BQ/Patient_0124.csv"))
+# patient_race <- read_csv(paste0(server_path,"BQ/PatientRace_0124.csv"))
+# 
+# patients_dedup <- patients %>%
+#   transmute(
+#     patientuid,
+#     first = first %>% str_format_removal() %>% gsub(" ","",.),
+#     last = last %>% str_format_removal() %>% gsub(" ","",.)
+#   ) %>%
+#   distinct()
+# 
+# saveRDS(patients_dedup, paste0(server_path,"disaggregation/patients_dedup_0124.rds"))
+# 
+# race_dedup <- patient_race %>%
+#   group_by(patientuid) %>%
+#   summarize(
+#     patientracecode = paste0(sort(unique(as.character(patientracecode))), collapse = ", "),
+#     patientracetext = paste0(sort(unique(patientracetext)), collapse = ", ")
+#   )
+# 
+# saveRDS(race_dedup, paste0(server_path,"share/pi/deho-pi/AFC/disaggregation/race_dedup_0124.rds"))
+# 
+# temp <- readRDS(paste0(server_path,"disaggregation/race_dedup_0124.rds")) %>%
+#   left_join(readRDS(paste0(server_path,"disaggregation/patients_dedup_0124.rds")))
+# 
+# patient_race_asian <- temp %>%
+#   mutate(
+#     asian_indian =
+#       (grepl("2029-7", patientracecode, ignore.case = T) |
+#         grepl("india", patientracetext, ignore.case = T)) &
+#       !grepl("american indian|american-indian|amer indian|ameri, india|alaska indian", patientracetext, ignore.case = T),
+#     chinese = grepl("2034-7", patientracecode, ignore.case = T) |
+#       grepl("chinese", patientracetext, ignore.case = T),
+#     filipino = grepl("2036-2", patientracecode, ignore.case = T) |
+#       grepl("filipino", patientracetext, ignore.case = T),
+#     japanese = grepl("2039-6", patientracecode, ignore.case = T) |
+#       grepl("japanese", patientracetext, ignore.case = T),
+#     korean = grepl("2040-4", patientracecode, ignore.case = T) |
+#       grepl("korean", patientracetext, ignore.case = T),
+#     vietnamese = grepl("2047-9", patientracecode, ignore.case = T) |
+#       grepl("vietnamese", patientracetext, ignore.case = T),
+#     other_asian = grepl("2028-9", patientracecode, ignore.case = T) |
+#       grepl("other asian", patientracetext, ignore.case = T),
+#     other_race = grepl("2106-3|2054-5|1002-5|2079-2|2086-7|2080-0|2500-7|2131-1", patientracecode, ignore.case = T) |
+#       grepl("white|black|africa|hawaii|guam|chamorro|samoa|pacific|native|american indian|american-indian|amer indian|ameri, india|alaska indian", patientracetext, ignore.case = T)
+#   ) %>%
+#   mutate(total = asian_indian + chinese + filipino + japanese + korean + vietnamese) %>%
+#   filter(total > 0) %>%
+#   mutate(
+#     last_length = nchar(last),
+#     first_length = nchar(first)
+#   ) %>%
+#   arrange(patientuid,last_length,first_length) %>%
+#   filter(!duplicated(patientuid))
+# 
+# only_asian <- patient_race_asian %>%
+#   filter(!other_race)
+# 
+# only_single_asian <- only_asian %>%
+#   mutate(
+#     total = asian_indian + chinese + filipino + japanese + korean + vietnamese + other_asian
+#   ) %>%
+#   filter(total == 1) %>%
+#   transmute(
+#     patientuid,
+#     raceeth = case_when(
+#       asian_indian ~ "asian_indian",
+#       chinese ~ "chinese",
+#       filipino ~ "filipino",
+#       japanese ~ "japanese",
+#       korean ~ "korean",
+#       vietnamese ~ "vietnamese"
+#     ),
+#     patientracetext,
+#     first,
+#     last
+#   ) %>% 
+#   filter(!is.na(last))
+# 
+# patient_location <- read_csv(paste0(server_path,"BQ/GeneratedPatientBaseline_0124.csv"))
+# 
+# patient_location_dedup <- patient_location %>%
+#   transmute(
+#     patientuid,
+#     dob,
+#     state = fips_state,
+#     county = paste0(fips_state, fips_county),
+#     zip = zipcode,
+#     tract = paste0(fips_state, fips_county, tract)
+#   ) %>%
+#   filter(!duplicated(patientuid))
+# 
+# patient_outcomes <- read_csv(paste0(server_path,"hesitancy/intermediate/csvs/condition_features_v4.csv.gz"))
+# 
+# patient_outcomes_dedup <- patient_outcomes %>%
+#   select(patientuid, hypertension, diabetes, depression, cancer, chronickidneydisease, asthma) %>%
+#   distinct() %>%
+#   group_by(patientuid) %>%
+#   summarize(across(
+#     everything(),
+#     ~sum(.)
+#   )) %>%
+#   mutate(across(
+#     hypertension:asthma,
+#     ~(ifelse(.>0,1,0))
+#   ))
+# 
+# patient_measurements <- read_csv(paste0(server_path,"hesitancy/intermediate/csvs/measurement_features_v4_with_values.csv.gz"))
+# 
+# patient_measurements_dedup <- patient_measurements %>%
+#   select(patientuid, diabetes, glucose, kidney, thyroid) %>%
+#   distinct() %>%
+#   group_by(patientuid) %>%
+#   summarize(across(
+#     everything(),
+#     ~sum(.)
+#   )) %>%
+#   mutate(across(
+#     diabetes:thyroid,
+#     ~(ifelse(.>0,1,0))
+#   ))
+# 
+# patient_procedures <- read_csv(paste0(server_path,"hesitancy/intermediate/csvs/procedures_features_v4_with_values.csv.gz"))
+# 
+# patient_procedures_dedup <- patient_procedures %>%
+#   select(patientuid, depressionscreen, cancer, advice, radiologicexam, electrocardiogram, mammogram, catheter) %>%
+#   distinct() %>%
+#   group_by(patientuid) %>%
+#   summarize(across(
+#     everything(),
+#     ~sum(.)
+#   )) %>%
+#   mutate(across(
+#     depressionscreen:catheter,
+#     ~(ifelse(.>0,1,0))
+#   ))
+# 
+# asian_patients <- only_single_asian %>%
+#   left_join(patient_location_dedup) %>%
+#   left_join(patient_outcomes_dedup %>% select(patientuid, hypertension, diabetes, depression, asthma)) %>%
+#   left_join(patient_measurements_dedup %>% select(patientuid, diabetes_test = diabetes)) %>% 
+#   left_join(patient_procedures_dedup %>% select(patientuid, depressionscreen, electrocardiogram)) %>% 
+#   mutate(across(
+#     hypertension:electrocardiogram,
+#     ~replace_na(.,0)
+#   )) %>%
+#   select(patientuid, firstname = first, surname = last,dob,state,county,zip,tract,everything())
+# 
+# saveRDS(asian_patients,paste0(server_path,"disaggregation/asian_patients.rds"))
+```
+
+This dataset is not available because it contains PHI.
+
+```{r}
+asian_patients <- readRDS(paste0(server_path,"disaggregation/asian_patients.rds"))
+```
+
+# Individual accuracy
+
+This for loop generates the primary bootstraps of the predictions. The final output is a list of 100 bootstraps that each contain the necessary information to create PR curves. See the bootstrap_afc() function and other helper functions in the helper script.
+
+```{r}
+geo_race_table_lst <- readRDS(paste0(github_path,"data/geography/geo_race_table.rds"))
+
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+patients_categorized <- asian_patients %>% 
+  mutate(
+    category = case_when(
+      surname %in% ssa_p_race_given_surname$name & surname %in% p_race_given_surname$name ~ "both",
+      surname %in% ssa_p_race_given_surname$name ~ "ssa only",
+      surname %in% p_race_given_surname$name ~ "wiki only",
+      TRUE ~ "neither"
+    )
+  )
+
+n_boot <- 100
+
+tic()
+bootstrap_pr_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+  bootstrap_afc(asian_patients, seed = i)
+}
+toc()
+
+saveRDS(
+  bootstrap_pr_results,
+  paste0(github_result_path, "boot_results_main.rds")
+)
+```
+
+## Table 3
+
+This run specifically is for Table 3 in the paper, in which we identify the 4 key subsets of the validation set and calculate avg precision for each separately. Otherwise conceptually it's the same as running for the whole validation set.
+
+```{r}
+n_boot <- 100
+
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+patients_categorized <- asian_patients %>% 
+  mutate(
+    category = case_when(
+      surname %in% ssa_p_race_given_surname$name & surname %in% p_race_given_surname$name ~ "both",
+      surname %in% ssa_p_race_given_surname$name ~ "ssa only",
+      surname %in% p_race_given_surname$name ~ "wiki only",
+      TRUE ~ "neither"
+    )
+  )
+
+pr_lst <- data.frame()
+
+tic()
+pr_lst <- pr_lst %>% rbind(
+  foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc(patients_categorized %>% filter(category =="both"), seed = i)
+  } %>% 
+    mutate(category = "both")
+)
+toc()
+
+tic()
+pr_lst <- pr_lst %>% rbind( 
+  foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc(patients_categorized %>% filter(category =="ssa only"), seed = i)
+  } %>% 
+    mutate(category = "ssa only")
+)
+toc()
+
+tic()
+pr_lst <- pr_lst %>% rbind(
+  foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc(patients_categorized %>% filter(category =="wiki only"), seed = i)
+  } %>% 
+    mutate(category = "wiki only")
+)
+toc()
+
+tic()
+pr_lst <- pr_lst %>% rbind(
+  foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc(patients_categorized %>% filter(category =="neither"), seed = i)
+  } %>% 
+    mutate(category = "neither")
+)
+toc()
+
+saveRDS(pr_lst, paste0(github_result_path,"boot_results_stratified_by_category.rds"))
+```
+
+## SI: Min/Max
+
+```{r}
+for(string in c("min","max")){
+  
+  load(paste0(github_path,"data/name_race_data/disagg_name_priors_",string,".rda"))
+  
+  n_boot <- 100
+
+  tic()
+  bootstrap_pr_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc_bisg(asian_patients, seed = i)
+  }
+  toc()
+  
+  saveRDS(
+    bootstrap_pr_results,
+    paste0(github_result_path, "boot_results_",string,".rds")
+  )
+  
+}
+```
+
+## SI: Geography
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+n_boot <- 100
+
+for(geo in c("zip","tract","state")){
+  
+  tic()
+  bootstrap_pr_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_afc_bisg(asian_patients, seed = i, geography = geo)
+  }
+  toc()
+  
+  saveRDS(
+    bootstrap_pr_results,
+    paste0(github_result_path, "boot_results_",geo,".rds")
+  )
+  
+}
+```
+
+## SI: BIFSG
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+n_boot <- 100
+
+tic()
+bootstrap_pr_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+  bootstrap_afc_bifsg(asian_patients, seed = i)
+}
+toc()
+
+saveRDS(
+  bootstrap_pr_results,
+  paste0(github_result_path, "boot_results_bifsg.rds")
+)
+```
+
+## SI: IPUMS
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_ipums.rda"))
+
+n_boot <- 100
+
+tic()
+temp <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+  bootstrap_afc_bisg(asian_patients, seed = i)
+}
+toc()
+
+saveRDS(
+  bootstrap_pr_results,
+  paste0(github_result_path, "boot_results_ipums.rds")
+)
+```
+
+## SI: Balanced
+
+```{r}
+n_boot <- 100
+
+tic()
+bootstrap_pr_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+  bootstrap_afc_balanced(asian_patients, seed = i)
+}
+toc()
+
+saveRDS(
+  bootstrap_pr_results,
+  paste0(github_result_path, "boot_results_balanced.rds")
+)
+```
+
+# PR tradeoff illustrations
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+p_race <- geo_race_table_lst$p_race_given_us
+```
+
+## Precision function
+
+```{r}
+bootstrap_precision <- function(patient_df, seed){
+  
+  set.seed(seed)
+  b_patient_df <- patient_df %>% 
+    slice_sample(n = nrow(.), replace = T)
+  
+  ssa_prediction <- b_patient_df %>% 
+    predict_disagg_race(firstname = F, ssa = T) %>% 
+    left_join(
+      patients_categorized %>% 
+        select(patientuid, raceeth, category),
+      by="patientuid"
+    )
+  
+  bisg_prediction <- b_patient_df %>% 
+    select(patientuid, firstname, surname, state, county, zip, tract) %>% 
+    predict_disagg_race(firstname = F) %>% 
+    left_join(
+      patients_categorized %>% 
+        select(patientuid, raceeth, category),
+      by="patientuid"
+    )
+  
+  hybrid_prediction <- ssa_prediction %>% 
+    filter(category %in% c("ssa only","wiki only")) %>% 
+    rbind(
+      bisg_prediction %>% 
+        filter(!category %in% c("ssa only","wiki only"))
+    )
+
+  ssa_100 <- seq(0.79,0.99,0.01) %>% 
+    map_dfr(function(x){
+      
+      unique(b_patient_df$raceeth) %>% 
+        map_dfr(function(y){
+          
+          set.seed(seed)
+        
+          temp <- ssa_prediction %>%
+            rename(race = all_of(y)) %>% 
+            filter(race >= x) %>% 
+            sample_n(pmin(nrow(.),100)) %>%
+            filter(raceeth == y) %>%
+            nrow() %>%
+            as.data.frame() %>%
+            rename(count = ".") %>%
+            mutate(
+              method = "SSA",
+              type = x,
+              raceeth = y,
+              total = ssa_prediction %>%
+                rename(race = all_of(y)) %>% 
+                filter(race >= x) %>% 
+                nrow()
+            )
+          
+        })
+      
+    })
+
+  bisg_100 <- seq(0.79,0.99,0.01) %>% 
+    map_dfr(function(x){
+      
+      unique(b_patient_df$raceeth) %>% 
+        map_dfr(function(y){
+          
+          set.seed(seed)
+        
+          temp <- bisg_prediction %>%
+            rename(race = all_of(y)) %>% 
+            filter(race >= x) %>% 
+            sample_n(pmin(nrow(.),100)) %>%
+            filter(raceeth == y) %>%
+            nrow() %>%
+            as.data.frame() %>%
+            rename(count = ".") %>%
+            mutate(
+              method = "BISG",
+              type = x,
+              raceeth = y,
+              total = bisg_prediction %>%
+                rename(race = all_of(y)) %>% 
+                filter(race >= x) %>% 
+                nrow()
+            )
+          
+        })
+      
+    })
+  
+  hybrid_100 <- seq(0.79,0.99,0.01) %>% 
+    map_dfr(function(x){
+      
+      unique(b_patient_df$raceeth) %>% 
+        map_dfr(function(y){
+          
+          set.seed(seed)
+        
+          temp <- hybrid_prediction %>%
+            rename(race = all_of(y)) %>% 
+            filter(race >= x) %>% 
+            sample_n(pmin(nrow(.),100)) %>%
+            filter(raceeth == y) %>%
+            nrow() %>%
+            as.data.frame() %>%
+            rename(count = ".") %>%
+            mutate(
+              method = "Hybrid",
+              type = x,
+              raceeth = y,
+              total = hybrid_prediction %>%
+                rename(race = all_of(y)) %>% 
+                filter(race >= x) %>% 
+                nrow()
+            )
+          
+        })
+      
+    })
+  
+  result <- rbind(ssa_100, bisg_100, hybrid_100) %>% mutate(seed = seed)
+  
+  return(result)
+}
+```
+
+## Precision run
+
+```{r}
+n_boot <- 100
+
+bootstrap_precision_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_precision(asian_patients, seed = i)
+}
+
+saveRDS(bootstrap_precision_results, paste0(github_result_path, "bootstrap_precision_results.rds"))
+```
+
+## Recall function
+
+```{r}
+bootstrap_recall <- function(patient_df, seed){
+  
+  set.seed(seed)
+  b_patient_df <- patient_df %>% 
+    slice_sample(n = nrow(.), replace = T)
+  
+  ssa_prediction <- b_patient_df %>% 
+    predict_disagg_race(firstname = F, ssa = T) %>% 
+    left_join(
+      patients_categorized %>% 
+        select(patientuid, raceeth, category),
+      by="patientuid"
+    )
+  
+  bisg_prediction <- b_patient_df %>% 
+    select(patientuid, firstname, surname, state, county, zip, tract) %>% 
+    predict_disagg_race(firstname = F) %>% 
+    left_join(
+      patients_categorized %>% 
+        select(patientuid, raceeth, category),
+      by="patientuid"
+    )
+  
+  hybrid_prediction <- ssa_prediction %>% 
+    filter(category %in% c("ssa only","wiki only")) %>% 
+    rbind(
+      bisg_prediction %>% 
+        filter(!category %in% c("ssa only","wiki only"))
+    )
+  
+  result <- unique(b_patient_df$raceeth) %>% 
+    map_dfr(function(y){
+      
+      total_actual <- b_patient_df %>% 
+        filter(raceeth == y) %>% 
+        nrow()
+      
+      ssa_recall <- 
+        seq(0.01,0.1,0.01) %>%
+        map_dfr(function(x){
+    
+          ssa_selected <- ssa_prediction %>% 
+            rename(race = all_of(y)) %>% 
+            filter(race > x)
+          
+          ssa_correct <- ssa_selected %>% 
+            filter(raceeth == y)
+          
+          if(nrow(ssa_correct) > total_actual * 0.99) {
+            
+            set.seed(seed)
+            
+            ssa_minimum <- ssa_selected %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= total_actual*0.99) %>% 
+              pull(index) %>% 
+              min()
+            
+            ssa <- data.frame(type = x) %>% 
+              mutate(
+                method = "SSA",
+                outreach = ssa_minimum,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          } else {
+            
+            set.seed(seed)
+            
+            ssa_additional <- ssa_prediction %>% 
+              rename(race = all_of(y)) %>%
+              filter(race <= x) %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= (total_actual*0.99 - nrow(ssa_correct))) %>% 
+              pull(index) %>% 
+              min()
+            
+            ssa <- data.frame(type = x) %>% 
+              mutate(
+                method = "SSA",
+                outreach = nrow(ssa_selected) + ssa_additional,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          }
+          
+          return(ssa)
+    
+        })
+      
+      bisg_recall <- 
+        seq(0.01,0.1,0.01) %>%
+        map_dfr(function(x){
+    
+          bisg_selected <- bisg_prediction %>% 
+            rename(race = all_of(y)) %>% 
+            filter(race > x)
+          
+          bisg_correct <- bisg_selected %>% 
+            filter(raceeth == y)
+          
+          if(nrow(bisg_correct) > total_actual * 0.99) {
+            
+            set.seed(seed)
+            
+            bisg_minimum <- bisg_selected %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= total_actual*0.99) %>% 
+              pull(index) %>% 
+              min()
+            
+            bisg <- data.frame(type = x) %>% 
+              mutate(
+                method = "BISG",
+                outreach = bisg_minimum,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          } else {
+            
+            set.seed(seed)
+            
+            bisg_additional <- bisg_prediction %>% 
+              rename(race = all_of(y)) %>%
+              filter(race <= x) %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= (total_actual*0.99 - nrow(bisg_correct))) %>% 
+              pull(index) %>% 
+              min()
+            
+            bisg <- data.frame(type = x) %>% 
+              mutate(
+                method = "BISG",
+                outreach = nrow(bisg_selected) + bisg_additional,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          }
+          
+          return(bisg)
+    
+        })
+      
+      hybrid_recall <- 
+        seq(0.01,0.1,0.01) %>%
+        map_dfr(function(x){
+    
+          hybrid_selected <- hybrid_prediction %>% 
+            rename(race = all_of(y)) %>% 
+            filter(race > x)
+          
+          hybrid_correct <- hybrid_selected %>% 
+            filter(raceeth == y)
+          
+          if(nrow(hybrid_correct) > total_actual * 0.99) {
+            
+            set.seed(seed)
+            
+            hybrid_minimum <- hybrid_selected %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= total_actual*0.99) %>% 
+              pull(index) %>% 
+              min()
+            
+            hybrid <- data.frame(type = x) %>% 
+              mutate(
+                method = "Hybrid",
+                outreach = hybrid_minimum,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          } else {
+            
+            set.seed(seed)
+            
+            hybrid_additional <- hybrid_prediction %>% 
+              rename(race = all_of(y)) %>%
+              filter(race <= x) %>% 
+              sample_n(nrow(.)) %>% 
+              mutate(
+                index = row_number(),
+                race = ifelse(
+                  raceeth == y,
+                  1,
+                  0
+                ),
+                cumul_race = cumsum(race)
+              ) %>% 
+              filter(cumul_race >= (total_actual*0.99 - nrow(hybrid_correct))) %>% 
+              pull(index) %>% 
+              min()
+            
+            hybrid <- data.frame(type = x) %>% 
+              mutate(
+                method = "Hybrid",
+                outreach = nrow(hybrid_selected) + hybrid_additional,
+                total_actual = total_actual,
+                oversample = outreach/total_actual,
+                raceeth = y
+              )
+            
+          }
+          
+          return(hybrid)
+    
+        })
+      
+      rbind(ssa_recall, bisg_recall, hybrid_recall) %>% mutate(seed = seed)
+      
+    })
+  
+  return(result)
+}
+```
+
+## Recall run
+
+```{r}
+n_boot <- 100
+
+bootstrap_recall_results <- foreach (i = 1:n_boot, .combine= "rbind") %dopar% {
+    bootstrap_recall(asian_patients, seed = i)
+}
+
+saveRDS(bootstrap_recall_results, paste0(github_result_path, "bootstrap_recall_results.rds"))
+```
+
+# Group prevalence
+
+## Function
+
+```{r}
+get_prevalence <- function(patient_df, seed, type = "imbalanced"){
+  
+  outcomes <- c("hypertension","diabetes","diabetes_test","depression","depressionscreen","asthma")
+  
+  if(type == "imbalanced"){
+    
+    set.seed(seed)
+    df <- patient_df %>% 
+    slice_sample(n = nrow(.), replace = T)
+    
+  }
+  if(type == "balanced"){
+    
+    set.seed(seed)
+    
+    df <- rbind(
+      patient_df %>% 
+      filter(raceeth == "asian_indian") %>% 
+      slice_sample(n = 6073, replace = T),
+      patient_df %>% 
+        filter(raceeth == "chinese") %>% 
+        slice_sample(n = 6218, replace = T),
+      patient_df %>% 
+        filter(raceeth == "filipino") %>% 
+        slice_sample(n = 4100, replace = T),
+      patient_df %>% 
+        filter(raceeth == "japanese") %>% 
+        slice_sample(n = 1059, replace = T),
+      patient_df %>% 
+        filter(raceeth == "korean") %>% 
+        slice_sample(n = 2058, replace = T),
+      patient_df %>% 
+        filter(raceeth == "vietnamese") %>% 
+        slice_sample(n = 2618, replace = T)
+    )
+    
+  }
+  
+  ssa_prediction <- df %>% 
+    select(patientuid, firstname, surname, state, county, zip, tract) %>% 
+    predict_disagg_race(firstname = F, ssa = T) %>% 
+    left_join(
+      df %>% 
+        select(patientuid, surname, all_of(outcomes)) %>% 
+        distinct(),
+      by="patientuid"
+    ) %>% 
+    left_join(
+      patients_categorized %>% select(patientuid,category)
+    )
+  
+  bisg_prediction <- df %>% 
+    select(patientuid, firstname, surname, state, county, zip, tract) %>% 
+    predict_disagg_race(firstname = F) %>% 
+    left_join(
+      df %>% 
+        select(patientuid, surname, all_of(outcomes)) %>% 
+        distinct(),
+      by="patientuid"
+    ) %>% 
+    left_join(
+      patients_categorized %>% select(patientuid,category)
+    )
+  
+  hybrid_prediction <- ssa_prediction %>% 
+    filter(category %in% c("ssa only","wiki only")) %>% 
+    rbind(
+      bisg_prediction %>% 
+        filter(!category %in% c("ssa only","wiki only"))
+    )
+  
+  result <- df %>% 
+    select(raceeth,all_of(outcomes)) %>%
+    mutate(type = "observed") %>% 
+    pivot_longer(
+      -c(type,raceeth),
+      names_to = "outcome",
+      values_to = "result"
+    ) %>%
+    group_by(type, raceeth, outcome) %>%
+    summarize(
+      n = sum(result),
+      total = n()
+    ) %>%
+    mutate(
+      prev = n/total,
+      sample = seed
+    ) %>%
+    rbind(
+      ssa_prediction %>% 
+        select(-patientuid, -surname, -category) %>% 
+        pivot_longer(
+          -all_of(outcomes),
+          names_to = "raceeth",
+          values_to = "n"
+        ) %>% 
+        pivot_longer(
+          -c(raceeth,n),
+          names_to = "outcome",
+          values_to = "result"
+        ) %>% 
+        group_by(raceeth, outcome) %>%
+        summarize(
+          n = sum(n*result,na.rm=T),
+          total = sum(n,na.rm=T)
+        ) %>% 
+        mutate(
+          prev = n/total,
+          sample = seed,
+          type = "SSA weighted"
+        ),
+      bisg_prediction %>% 
+        select(-patientuid, -surname, -category) %>% 
+        pivot_longer(
+          -all_of(outcomes),
+          names_to = "raceeth",
+          values_to = "n"
+        ) %>% 
+        pivot_longer(
+          -c(raceeth,n),
+          names_to = "outcome",
+          values_to = "result"
+        ) %>% 
+        group_by(raceeth, outcome) %>%
+        summarize(
+          n = sum(n*result,na.rm=T),
+          total = sum(n,na.rm=T)
+        ) %>% 
+        mutate(
+          prev = n/total,
+          sample = seed,
+          type = "BISG weighted"
+        ),
+      hybrid_prediction %>% 
+        select(-patientuid, -surname, -category) %>% 
+        pivot_longer(
+          -all_of(outcomes),
+          names_to = "raceeth",
+          values_to = "n"
+        ) %>% 
+        pivot_longer(
+          -c(raceeth,n),
+          names_to = "outcome",
+          values_to = "result"
+        ) %>% 
+        group_by(raceeth, outcome) %>%
+        summarize(
+          n = sum(n*result,na.rm=T),
+          total = sum(n,na.rm=T)
+        ) %>% 
+        mutate(
+          prev = n/total,
+          sample = seed,
+          type = "Hybrid weighted"
+        )
+    ) %>% 
+    ungroup()
+  
+}
+```
+
+## Run
+
+```{r}
+load(paste0(github_path,"data/name_race_data/disagg_name_priors_main.rda"))
+
+patients_categorized <- asian_patients %>% 
+  mutate(
+    category = case_when(
+      surname %in% ssa_p_race_given_surname$name & surname %in% p_race_given_surname$name ~ "both",
+      surname %in% ssa_p_race_given_surname$name ~ "ssa only",
+      surname %in% p_race_given_surname$name ~ "wiki only",
+      TRUE ~ "neither"
+    )
+  )
+  
+n_boot <- 100
+
+prevalence_results <- foreach (i = 1:n_boot, .combine = "rbind") %dopar% {
+  get_prevalence(asian_patients, seed = i)
+}
+
+saveRDS(prevalence_results, paste0(github_result_path,"prevalence_results.rds"))
+```
+
+## SI: Balanced
+
+```{r}
+n_boot <- 100
+
+prevalence_results <- foreach (i = 1:n_boot, .combine = "rbind") %dopar% {
+  get_prevalence(asian_patients, seed = i, type = "balanced")
+}
+
+saveRDS(prevalence_results, paste0(github_result_path,"prevalence_results_balanced.rds"))
+```
