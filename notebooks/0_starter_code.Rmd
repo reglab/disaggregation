@@ -1,0 +1,78 @@
+---
+title: "starter_code"
+author: "Derek Ouyang"
+date: "2024-10-29"
+output: html_document
+---
+
+The following notebook is designed as a template for users who want to quickly start using our Wikidata-based tables for race imputation for Asian American subgroups. The other notebooks and data in our repo can be used to explore more in-depth variations in the pipeline, and to replicate the results of the paper.
+
+Set your working directory to be the cloned github repo.
+
+The minimum packages needed are `tidyverse` and `stringi`.
+
+```{r}
+library(tidyverse)
+library(stringi)
+source("scripts/name_cleaning_helper_functions.R")
+```
+
+# Clean your own data
+
+You'll need to format your own dataset of individuals for whom you wish to impute Asian subgroup. First, your dataset should have the following fields:
+
+- `id`: a unique identifier for each individual
+- `firstname`: first name as an uncleaned text string; can be left as NA
+- `surname`: surname as an uncleaned text string; can be left as NA
+- `state`: formatted as a 2-digit FIPS code, like "06" for California; can be left as NA
+- `county`: formatted as a 5-digit FIPS code, like "06085" for Santa Clara County; can be left as NA
+- `zip`: formatted as a 5-digit ZIP Code, like 94305; can be left as NA
+- `tract`: formatted as an 11-digit GEOID, like "06085513000"; can be left as NA
+
+The name fields can be cleaned using the code below.
+
+```{r}
+data <- data %>% 
+  mutate(
+    firstname = firstname %>% str_format_removal() %>% gsub(" ","",.),
+    surname = surname %>% str_format_removal() %>% gsub(" ","",.)
+  )
+```
+
+Note that `str_format_removal()` performs a variety of steps, such as converting to ASCII, converting to uppercase, removing punctuation, and removing standalone characters. This is followed by removing all spaces from the string.
+
+If you don't already have location information for your individuals in state, county, ZIP Code, and tract, you will need to perform your own geocoding. Note that if geography information is missing at the specified level, the BISG function will default to using USA-level race proportions. 
+
+# Load distribution tables
+
+```{r}
+load("data/name_race_data/disagg_name_priors_main.rda")
+geo_race_table_lst <- readRDS("data/geography/geo_race_table.rds")
+```
+
+`disagg_name_priors_main.rda` has multiple dataframe objects, such as `p_race_given_surname`. `geo_race_table_lst` is a list object with multiple dataframe objects contained within, such as `p_race_given_county`. 
+
+# Run BISG
+
+The function `predict_disagg_race()` is contained within the following R script.
+
+```{r}
+source("scripts/imputation_helper_functions.R")
+```
+
+By default, the function can be used directly on your dataframe (formatted with the fields above, with cleaned name strings), and will default to implementing BISG with county geographies. You can also set `firstname = T` to perform BIFSG, and specify a geography ("state", "county", "zip", or "tract").
+
+```{r}
+bisg_results <- data %>% 
+  predict_disagg_race()
+
+bifsg_results <- data %>% 
+  predict_disagg_race(firstname = T)
+
+bisg_zip_results <- data %>% 
+  predict_disagg_race(geo = "zip")
+```
+
+The resulting dataframe will have six additional fields, which are the posterior probabilities that the individual is `asian_indian`, `chinese`, `filipino`, `japanese`, `korean`, or `vietnamese`. These values will add up to 1 (with the exception of some cases where all values will be 0, because the input probabilities were entirely conflicting).
+
+For examples of how to conduct a more formal validation, or to explore alternative pipelines, review the other notebooks in the repo.
