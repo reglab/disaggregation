@@ -56,3 +56,16 @@ There are two additional SSA name list files that can be added to `external_data
 
 - [results/](https://github.com/reglab/disaggregation/tree/main/output/results): Various .rds files holding the input data necessary to produce the figures in the paper.
 - [figures/](https://github.com/reglab/disaggregation/tree/main/output/figures): PNG files of figures in the paper.
+
+# Future Work
+
+We outline four potential directions of future work below.
+
+First, while our approach could be extended to smaller Asian subgroups, we are limited by the sample sizes we can obtain from Wikidata. Names from a selection of smaller Asian subgroups could be grouped together as an “Other Asian” category, and the probability distributions for name and geography could be appended with this category, accordingly. Future work could explore the performance of such an augmented dataset in settings that include other Asian subgroups.
+
+Second, future work could explore prediction performance in settings that include all race groups, where researchers have no race information at all. A potential solution is to deploy conventional BISG to first determine the likelihood that individuals identify as API, and then perform our disaggregated imputation, propagating uncertainties through the two stages. Those who have a high API likelihood may, of course, include NHPI individuals; prediction performance impacts are likely similar in nature to those driven by members of less common Asian subgroups. We expect Wikidata can be used to generate reasonable name-race distributions that include NHPI as an aggregated category or disaggregated categories. More generally, our methodology can likely be applied across all disaggregated subgroups required in the 2024 revised federal standards, but predictive performance is likely to be extremely heterogeneous, given sparse Wikidata coverage of individuals with structured name, birthplace, and citizenship information from less populous countries and regions, as well as the fundamental variation in distinctiveness of names across certain subgroups (i.e., ethnic subgroups that share a common written language).  
+
+Third, future work could explore whether performance could be improved by incorporating these probabilistic inputs into name algorithms that go beyond current Bayesian methods, such as machine learning models that have been shown to yield accuracy improvements. As before, validation with a subset of ground truth labels will provide the most valuable information about whether such augmented methods are advantageous in particular settings.
+
+Fourth, this domain of work would fundamentally benefit from the release of disaggregated name-race distribution information sourced directly from large U.S. administrative datasets, such as SSA files or Census Bureau Decennial surveys. Should such data become available, future work could conduct a more thorough assessment of Wikidata's accuracy, and determine whether there are still use cases for Wikidata in subgroup race imputation.
+
