@@ -397,7 +397,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/pr_curves.png'),
+  paste0(fig_path, '/pr_curves.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -733,7 +733,7 @@ plot <- ggplot(summary) +
 plot
 
 ggsave(
-  paste0(fig_path, '/prevalences.png'),
+  paste0(fig_path, '/prevalences.pdf'),
   plot,
   width = 9,
   height = 11,
@@ -842,9 +842,9 @@ boot_results <- readRDS(paste0(github_result_path, "boot_results_main.rds")) %>%
   mutate(Method = "Wikidata, Main") %>% 
   rbind(
     readRDS(paste0(github_result_path, "boot_results_min.rds")) %>% 
-      mutate(Method = "Wikidata, Minimalist"),
+      mutate(Method = "Wikidata, Minimal"),
     readRDS(paste0(github_result_path, "boot_results_max.rds")) %>% 
-      mutate(Method = "Wikidata, Maximalist")
+      mutate(Method = "Wikidata, Maximal")
   )
 
 figure_setting_lst <- list(
@@ -916,7 +916,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/minmax.png'),
+  paste0(fig_path, '/minmax.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -1000,7 +1000,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/geography.png'),
+  paste0(fig_path, '/geography.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -1080,7 +1080,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/bifsg.png'),
+  paste0(fig_path, '/bifsg.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -1170,7 +1170,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/ipums.png'),
+  paste0(fig_path, '/ipums.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -1254,7 +1254,7 @@ plot <- boot_results %>%
 plot
 
 ggsave(
-  paste0(fig_path, '/pr_curves_balanced.png'),
+  paste0(fig_path, '/pr_curves_balanced.pdf'),
   plot,
   width = 9,
   height = 7,
@@ -1318,7 +1318,8 @@ summary <- prevalence_results %>%
     line_positions = as.numeric(factor(raceeth, levels = unique(raceeth))),
     line_positions = line_positions + .5,
     line_positions = ifelse(line_positions == max(line_positions), NA, line_positions)
-  ) 
+  ) %>% 
+  filter(!is.na(outcome))
 
 figure_setting_lst <- list(
   theme_bw(),
@@ -1415,7 +1416,7 @@ plot <- ggplot(summary) +
 plot
 
 ggsave(
-  paste0(fig_path, '/prevalences_balanced.png'),
+  paste0(fig_path, '/prevalences_balanced.pdf'),
   plot,
   width = 9,
   height = 11,
